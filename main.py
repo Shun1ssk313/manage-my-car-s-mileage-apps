@@ -217,10 +217,21 @@ else:
 
     # --- モデル3: Prophet ---
     df_prophet = df[['date', 'mileage']].rename(columns={'date': 'ds', 'mileage': 'y'})
-    model_prophet = Prophet()
+    current_max_mileage = df['mileage'].max()
+    
+    # 単調増加のドメイン知識をProphetに強制させるため、ロジスティック成長モデルを利用する。
+    # floor（下限）を現在の最大走行距離に設定することで、未来予測が現在値を下回る（距離が減る）暴走を防ぐ。
+    df_prophet['floor'] = current_max_mileage
+    # ロジスティックモデルはcap（上限）が必須なため、到達し得ない十分大きな値を設定する。
+    assumed_cap = max(TARGET_MILEAGE * 2, current_max_mileage + 200000)
+    df_prophet['cap'] = assumed_cap
+    
+    model_prophet = Prophet(growth='logistic')
     model_prophet.fit(df_prophet)
     
     future_target_prophet = pd.DataFrame({'ds': [target_date]})
+    future_target_prophet['floor'] = current_max_mileage
+    future_target_prophet['cap'] = assumed_cap
     pred_target_prophet = model_prophet.predict(future_target_prophet)['yhat'].iloc[0]
     
     st.subheader(f"🎯 5年後の到達予測診断 (目標: {TARGET_MILEAGE:,.0f} km以内)")
@@ -287,6 +298,8 @@ else:
     
     # --- 3. Prophetモデルの信頼区間取得 ---
     future_prophet = pd.DataFrame({'ds': pred_dates})
+    future_prophet['floor'] = current_max_mileage
+    future_prophet['cap'] = assumed_cap
     forecast = model_prophet.predict(future_prophet)
     pred_y_prophet = forecast['yhat']
     prophet_lower = forecast['yhat_lower']
