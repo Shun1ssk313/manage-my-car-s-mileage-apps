@@ -12,7 +12,7 @@ from datetime import timedelta
 import time
 import os
 from sklearn.linear_model import LinearRegression
-from prophet import Prophet
+import statsmodels.api as sm
 
 # --- 定数設定 ---
 DATA_FILE = "mileage_data.csv"
@@ -215,24 +215,31 @@ else:
     model_recent = LinearRegression().fit(X_recent, y_recent)
     pred_target_recent = model_recent.predict(target_X_df)[0]
 
-    # --- モデル3: Prophet ---
-    df_prophet = df[['date', 'mileage']].rename(columns={'date': 'ds', 'mileage': 'y'})
-    current_max_mileage = df['mileage'].max()
+    # --- モデル3: 状態空間モデル (Local Linear Trend) ---
+    # カルマンフィルタを用いて観測ノイズとシステムノイズ(ペースの変動)を分離し、
+    # 累積データ（単調増加）に適合する確率的予測モデルを構築する。
+    # statsmodelsは等間隔の時系列データを前提とするため、日次データ(欠損日はNaN)として再構築する。
+    date_range = pd.date_range(start=df['date'].min(), end=df['date'].max(), freq='D')
+    df_ssm = pd.DataFrame({'date': date_range})
+    df_ssm = df_ssm.merge(df[['date', 'mileage']], on='date', how='left')
+    df_ssm.set_index('date', inplace=True)
     
-    # 単調増加のドメイン知識をProphetに強制させるため、ロジスティック成長モデルを利用する。
-    # floor（下限）を現在の最大走行距離に設定することで、未来予測が現在値を下回る（距離が減る）暴走を防ぐ。
-    df_prophet['floor'] = current_max_mileage
-    # ロジスティックモデルはcap（上限）が必須なため、到達し得ない十分大きな値を設定する。
-    assumed_cap = max(TARGET_MILEAGE * 2, current_max_mileage + 200000)
-    df_prophet['cap'] = assumed_cap
+    # 'local linear trend' はレベル(現在の距離)とトレンド(現在のペース)の両方が
+    # 確率的に変動すると仮定し、直近のペース変化を滑らかに捉える。
+    model_ssm = sm.tsa.UnobservedComponents(df_ssm['mileage'], level='local linear trend')
+    res_ssm = model_ssm.fit(disp=False)
     
-    model_prophet = Prophet(growth='logistic')
-    model_prophet.fit(df_prophet)
+    target_date_pd = pd.to_datetime(target_date)
+    steps_to_target = (target_date_pd - df['date'].max()).days
+    forecast_steps = max(365 * 5, steps_to_target + 30)
     
-    future_target_prophet = pd.DataFrame({'ds': [target_date]})
-    future_target_prophet['floor'] = current_max_mileage
-    future_target_prophet['cap'] = assumed_cap
-    pred_target_prophet = model_prophet.predict(future_target_prophet)['yhat'].iloc[0]
+    forecast_ssm = res_ssm.get_forecast(steps=forecast_steps)
+    
+    if target_date_pd in forecast_ssm.predicted_mean.index:
+        pred_target_ssm = forecast_ssm.predicted_mean[target_date_pd]
+    else:
+        # インデックス外へのアクセスを防ぐためのフォールバック
+        pred_target_ssm = forecast_ssm.predicted_mean.iloc[-1]
     
     st.subheader(f"🎯 5年後の到達予測診断 (目標: {TARGET_MILEAGE:,.0f} km以内)")
     st.caption(f"※ 起点日 ({start_date.strftime('%Y/%m/%d')}) から5年後の **{target_date.strftime('%Y/%m/%d')}** 時点の累積距離を予測・評価します。")
@@ -253,11 +260,11 @@ else:
             st.success(f"✅ **順調**\n\n予測: **{pred_target_recent:,.0f}** km\n\n最近のペースでも5年後に目標内に収まります。")
 
     with col_c:
-        st.markdown("**🤖 3. Prophet予測**")
-        if pred_target_prophet > TARGET_MILEAGE:
-            st.warning(f"⚠️ **注意**\n\n予測: **{pred_target_prophet:,.0f}** km\n\nProphetの予測でも5年後に目標をオーバーします。")
+        st.markdown("**🤖 3. 状態空間モデル予測**")
+        if pred_target_ssm > TARGET_MILEAGE:
+            st.warning(f"⚠️ **注意**\n\n予測: **{pred_target_ssm:,.0f}** km\n\nカルマンフィルタの予測でも5年後に目標をオーバーします。")
         else:
-            st.success(f"✅ **順調**\n\n予測: **{pred_target_prophet:,.0f}** km\n\nProphetの予測でも5年後に目標内に収まります。")
+            st.success(f"✅ **順調**\n\n予測: **{pred_target_ssm:,.0f}** km\n\nカルマンフィルタの予測でも5年後に目標内に収まります。")
 
     target_days_from_last = (target_date - df['date'].max()).days
     future_days = max(365 * 5, target_days_from_last + 30) 
@@ -296,14 +303,12 @@ else:
     upper_recent = pred_y_recent + margin_recent
     lower_recent = pred_y_recent - margin_recent
     
-    # --- 3. Prophetモデルの信頼区間取得 ---
-    future_prophet = pd.DataFrame({'ds': pred_dates})
-    future_prophet['floor'] = current_max_mileage
-    future_prophet['cap'] = assumed_cap
-    forecast = model_prophet.predict(future_prophet)
-    pred_y_prophet = forecast['yhat']
-    prophet_lower = forecast['yhat_lower']
-    prophet_upper = forecast['yhat_upper']
+    # --- 3. 状態空間モデルの信頼区間取得 ---
+    pred_dates_ssm = forecast_ssm.predicted_mean.index.to_pydatetime()
+    pred_y_ssm = forecast_ssm.predicted_mean.values
+    ssm_ci = forecast_ssm.conf_int(alpha=0.05)
+    ssm_lower = ssm_ci.iloc[:, 0].values
+    ssm_upper = ssm_ci.iloc[:, 1].values
     
     st.markdown("<br>", unsafe_allow_html=True)
     st.subheader("⚙️ グラフ表示設定")
@@ -315,7 +320,7 @@ else:
         show_m2 = st.checkbox("2. 直近予測を表示", value=True)
         show_ci2 = st.checkbox("2. 信頼区間を表示", value=False, key="ci2")
     with col_opt3:
-        show_m3 = st.checkbox("3. Prophet予測を表示", value=True)
+        show_m3 = st.checkbox("3. 状態空間モデル予測を表示", value=True)
         show_ci3 = st.checkbox("3. 信頼区間を表示", value=True, key="ci3")
 
     fig = go.Figure()
@@ -344,13 +349,13 @@ else:
 
     if show_ci3:
         fig.add_trace(go.Scatter(
-            x=pred_dates + pred_dates[::-1], y=list(prophet_upper) + list(prophet_lower)[::-1],
+            x=list(pred_dates_ssm) + list(pred_dates_ssm)[::-1], y=list(ssm_upper) + list(ssm_lower)[::-1],
             fill='toself', fillcolor='rgba(0, 128, 0, 0.15)', line=dict(color='rgba(255,255,255,0)'),
-            hoverinfo="skip", showlegend=False, name='Prophetブレ幅'
+            hoverinfo="skip", showlegend=False, name='SSMブレ幅'
         ))
     if show_m3:
-        fig.add_trace(go.Scatter(x=pred_dates, y=pred_y_prophet, mode='lines', 
-                                 name=f'Prophet予測 (5年後予想: {pred_target_prophet:,.0f}km)', 
+        fig.add_trace(go.Scatter(x=pred_dates_ssm, y=pred_y_ssm, mode='lines', 
+                                 name=f'状態空間モデル予測 (5年後予想: {pred_target_ssm:,.0f}km)', 
                                  line=dict(color='green', dash='solid', width=2)))
                              
     fig.add_trace(go.Scatter(x=df['date'], y=df['mileage'], mode='lines+markers', 

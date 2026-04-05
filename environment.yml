@@ -303,6 +303,7 @@ dependencies:
     - ormsgpack==1.12.1
     - pandas==2.3.3
     - pathspec==1.0.3
+    - patsy==1.0.2
     - peewee==3.18.3
     - peewee-migrate==1.14.3
     - pillow==12.1.0
@@ -373,6 +374,7 @@ dependencies:
     - starlette==0.50.0
     - starlette-compress==1.6.1
     - starsessions==2.2.1
+    - statsmodels==0.14.6
     - streamlit==1.47.1
     - sympy==1.14.0
     - tenacity==9.1.2
@@ -408,3 +410,4 @@ dependencies:
     - yarl==1.22.0
     - yfinance==0.2.65
     - youtube-transcript-api==1.2.3
+prefix: /Users/shun1_ssk/miniforge3/envs/py312_env
