@@ -92,6 +92,22 @@ def check_validation(df_check: pd.DataFrame, target_date: datetime.date | dateti
 
 # --- UI構築 ---
 st.set_page_config(page_title="走行距離予測ダッシュボード", layout="wide")
+
+# --- 簡易パスワード認証 ---
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("🔒 認証が必要です")
+    pw = st.text_input("パスワードを入力してください", type="password")
+    if st.button("ログイン"):
+        if pw == st.secrets["app_password"]:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("パスワードが違います")
+    st.stop()
+
 st.title("🚗 走行距離 予測＆管理ダッシュボード")
 
 # Streamlitの再描画アーキテクチャにおいて、確認ダイアログ（上書きのYes/No）の
@@ -216,16 +232,23 @@ else:
     pred_target_recent = model_recent.predict(target_X_df)[0]
 
     # --- モデル3: 状態空間モデル (Local Linear Trend) ---
-    # カルマンフィルタを用いて観測ノイズとシステムノイズ(ペースの変動)を分離し、
-    # 累積データ（単調増加）に適合する確率的予測モデルを構築する。
-    # statsmodelsは等間隔の時系列データを前提とするため、日次データ(欠損日はNaN)として再構築する。
+    # 【仕組みの概要】
+    # 状態空間モデルは、「観測される値（ユーザーが入力した距離）」の背後に、「観測できない真の状態（実際の正確な距離と、現在の走行ペース）」が
+    # 存在すると仮定して推論を行うアプローチです。カルマンフィルタというアルゴリズムを用いて、観測ノイズ（入力のブレ）と
+    # システムノイズ（ライフスタイルの変化によるペースの変動）を分離しながら、現在の「真のペース」を推定します。
+    
+    # statsmodelsライブラリはカレンダー通りに連続した等間隔の時系列データを前提とするため、
+    # まずは不規則な入力データを日次データ(入力がない日はNaN)としてカレンダー状に再構築します。
+    # カルマンフィルタは、NaNの日を自動的に予測で補完（フィルタリング）しながら状態を滑らかに更新していきます。
     date_range = pd.date_range(start=df['date'].min(), end=df['date'].max(), freq='D')
     df_ssm = pd.DataFrame({'date': date_range})
     df_ssm = df_ssm.merge(df[['date', 'mileage']], on='date', how='left')
     df_ssm.set_index('date', inplace=True)
     
-    # 'local linear trend' はレベル(現在の距離)とトレンド(現在のペース)の両方が
-    # 確率的に変動すると仮定し、直近のペース変化を滑らかに捉える。
+    # 【モデル設定: Local Linear Trend】
+    # 'local linear trend'（ローカル線形トレンド）という設定は、レベル(現在の累積距離)とトレンド(現在のペース)の
+    # 両方が時間とともに確率的に変動（ランダムウォーク）すると仮定するモデルです。
+    # これにより、単なる直線ではなく「最近ちょっと車に乗らなくなった」といったペースの変化に追従する滑らかな予測が可能になります。
     model_ssm = sm.tsa.UnobservedComponents(df_ssm['mileage'], level='local linear trend')
     res_ssm = model_ssm.fit(disp=False)
     
@@ -303,7 +326,12 @@ else:
     upper_recent = pred_y_recent + margin_recent
     lower_recent = pred_y_recent - margin_recent
     
-    # --- 3. 状態空間モデルの信頼区間取得 ---
+    # --- 3. 状態空間モデルの信頼区間（予測範囲）取得 ---
+    # 【予測範囲（ブレ幅）の性質】
+    # 線形回帰のブレ幅が疑似的にスケーリングして計算されているのに対し、状態空間モデルの予測区間は
+    # 「ペースが今後どう変わるかわからない」という確率的な不確実性が、時間経過とともに積分されて蓄積していく
+    # 性質（確率過程）を数学的に正確に表現しています。そのため、遠い未来ほど自然にラッパ状に広がっていきます。
+    # ここでは alpha=0.05 を指定し、95%の確率で将来の距離が収まる範囲（95%予測区間）を取得しています。
     pred_dates_ssm = forecast_ssm.predicted_mean.index.to_pydatetime()
     pred_y_ssm = forecast_ssm.predicted_mean.values
     ssm_ci = forecast_ssm.conf_int(alpha=0.05)
