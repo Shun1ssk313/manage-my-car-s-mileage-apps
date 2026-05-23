@@ -10,56 +10,40 @@ import plotly.graph_objects as go
 import datetime
 from datetime import timedelta
 import time
-import os
+from streamlit_gsheets import GSheetsConnection
 from sklearn.linear_model import LinearRegression
 import statsmodels.api as sm
 
 # --- 定数設定 ---
-DATA_FILE = "mileage_data.csv"
 TARGET_YEARS = 5
 TARGET_MILEAGE = 60000
 
+def get_conn():
+    return st.connection("gsheets", type=GSheetsConnection)
+
 def load_data() -> pd.DataFrame:
-    """マイレージデータをCSVファイルから読み込み、正規化して返す。
-    
-    時系列予測モデルおよびバリデーションロジックが前提とする「時間的順序」を保証するため、
-    不規則な入力順であっても常に日付の昇順でソートされた状態を提供する。
-    
-    Returns:
-        pd.DataFrame: 'date'(datetime64)と'mileage'(int)を持つソート済みデータフレーム。
-    """
-    if not os.path.exists(DATA_FILE):
-        df = pd.DataFrame(columns=["date", "mileage"])
-        df.to_csv(DATA_FILE, index=False)
-    else:
-        df = pd.read_csv(DATA_FILE)
-    
+    """マイレージデータをGoogleスプレッドシートから読み込み、正規化して返す。"""
+    df = get_conn().read(usecols=[0, 1], ttl=0)
+    df = df.dropna(how="all")
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
+        df["mileage"] = df["mileage"].astype(int)
         df = df.sort_values("date").reset_index(drop=True)
     return df
 
 def add_or_update_data(date: datetime.date | datetime.datetime, mileage: int, update: bool = False) -> None:
-    """走行距離データをCSVへ永続化する。
-    
-    同一日付のデータは原則1件のみとするビジネスルールに基づき、
-    updateフラグがTrueの場合は既存の同日データをパージしてから新しい値で再構成する。
-    
-    Args:
-        date (datetime.date | datetime.datetime): 記録日
-        mileage (int): 累積走行距離
-        update (bool, optional): 既存の同日データを上書きするかどうか. Defaults to False.
-    """
+    """走行距離データをGoogleスプレッドシートへ永続化する。"""
     df = load_data()
     date_pd = pd.to_datetime(date)
-    
+
     if update:
         df = df[df["date"] != date_pd]
-        
-    new_row = pd.DataFrame([{"date": date_pd, "mileage": mileage}])
+
+    new_row = pd.DataFrame([{"date": date_pd.strftime("%Y-%m-%d"), "mileage": mileage}])
+    df["date"] = df["date"].dt.strftime("%Y-%m-%d")
     df = pd.concat([df, new_row], ignore_index=True)
     df = df.sort_values("date").reset_index(drop=True)
-    df.to_csv(DATA_FILE, index=False)
+    get_conn().update(data=df)
 
 def check_validation(df_check: pd.DataFrame, target_date: datetime.date | datetime.datetime, target_mileage: int) -> tuple[bool, str]:
     """入力された走行距離が、既存の時系列データと物理的矛盾を起こさないか検証する。

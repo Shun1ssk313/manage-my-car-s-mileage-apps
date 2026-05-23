@@ -4,3 +4,4 @@ numpy==2.2.6
 plotly==6.3.1
 scikit-learn==1.7.0
 statsmodels==0.14.6
+st-gsheets-connection==0.1.0
